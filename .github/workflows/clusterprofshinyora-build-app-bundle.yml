@@ -65,8 +65,8 @@ env:
   ARCHIVE_URLS: ""
   EXTRA_REPOS: ""
   SOFT_PKGS: ""
-  SOURCE_REBUILD: ""
-  APP_NOTES: "Multi-file Shiny app copied verbatim. Upstream declares no license."
+  SOURCE_REBUILD: "gdtools"
+  APP_NOTES: "Multi-file Shiny app copied verbatim. Upstream declares no license. gdtools is rebuilt from source on macOS to avoid non-portable XQuartz linkage."
   MAX_REQUEST_MB: "1024"
   R_VERSION: "4.6.1"
 
