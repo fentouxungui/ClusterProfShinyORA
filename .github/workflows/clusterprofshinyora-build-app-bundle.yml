@@ -69,7 +69,7 @@ env:
   APP_NOTES: "Multi-file Shiny app copied verbatim. Upstream declares no license. gdtools is rebuilt from source on macOS to avoid non-portable XQuartz linkage."
   MAX_REQUEST_MB: "1024"
   SMOKE: "on"
-  SMOKE_TIMEOUT_SEC: "600"
+  SMOKE_TIMEOUT_SEC: "420"
   R_VERSION: "4.6.1"
 
 jobs:
@@ -251,6 +251,7 @@ jobs:
 
       - name: Smoke test (launch the bundle like the ShinyApps shell)
         if: ${{ env.SMOKE != 'off' }}
+        timeout-minutes: 12
         shell: Rscript {0}
         run: |
           app_id <- Sys.getenv("APP_ID"); ver <- Sys.getenv("VERSION"); plat <- "${{ matrix.platform }}"
@@ -269,13 +270,14 @@ jobs:
             shiny::runApp(appdir, host = "127.0.0.1", port = port, launch.browser = FALSE)
           }, args = list(appdir = appdir, lib = lib, port = port), supervise = TRUE,
              stdout = file.path(tmp, "smoke.out"), stderr = file.path(tmp, "smoke.err"))
-          h <- curl::new_handle(connecttimeout = 5, timeout = 15)
-          ok <- FALSE; last <- "none"; why <- "deadline"
+          ok <- FALSE; last <- "none"; why <- "deadline"; i <- 0
           while (as.numeric(Sys.time() - t0) < timeout) {
-            Sys.sleep(2)
+            Sys.sleep(2); i <- i + 1
             if (!proc$is_alive()) { why <- "process exited"; break }
-            r <- tryCatch(curl::curl_fetch_memory(sprintf("http://127.0.0.1:%d/", port), handle = h),
+            r <- tryCatch(curl::curl_fetch_memory(sprintf("http://127.0.0.1:%d/", port),
+                          handle = curl::new_handle(connecttimeout = 4, timeout = 10)),
                           error = function(e) { last <<- paste("error:", conditionMessage(e)); NULL })
+            if (i %% 15 == 0) cat(sprintf("smoke: still waiting (%ss, last=%s)\n", round(as.numeric(Sys.time() - t0)), last))
             if (!is.null(r)) { last <- paste("HTTP", r$status_code)
               if (r$status_code >= 200 && r$status_code < 400) { ok <- TRUE; why <- "served"; break } }
           }
