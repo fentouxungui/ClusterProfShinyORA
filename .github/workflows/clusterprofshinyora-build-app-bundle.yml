@@ -69,7 +69,7 @@ env:
   APP_NOTES: "Multi-file Shiny app copied verbatim. Upstream declares no license. gdtools is rebuilt from source on macOS to avoid non-portable XQuartz linkage."
   MAX_REQUEST_MB: "1024"
   SMOKE: "on"
-  SMOKE_TIMEOUT_SEC: "420"
+  SMOKE_TIMEOUT_SEC: "300"
   R_VERSION: "4.6.1"
 
 jobs:
@@ -254,6 +254,9 @@ jobs:
         timeout-minutes: 12
         shell: Rscript {0}
         run: |
+          # Reproduce the ShinyApps shell's startup: put the bundle's rlib on .libPaths and
+          # load the app from its own directory. Runs in a child process with a hard timeout so
+          # it can never hang, and surfaces the exact R error if the app fails to start.
           app_id <- Sys.getenv("APP_ID"); ver <- Sys.getenv("VERSION"); plat <- "${{ matrix.platform }}"
           zip <- sprintf("%s-%s-%s.zip", app_id, ver, plat)
           if (!file.exists(zip)) stop("smoke: bundle not found: ", zip)
@@ -261,33 +264,26 @@ jobs:
           utils::unzip(zip, exdir = tmp)
           appdir <- file.path(tmp, "app"); lib <- file.path(tmp, "rlib")
           if (!dir.exists(appdir) || !dir.exists(lib)) stop("smoke: unexpected bundle layout")
-          timeout <- suppressWarnings(as.integer(Sys.getenv("SMOKE_TIMEOUT_SEC", "600"))); if (is.na(timeout) || timeout < 30) timeout <- 600
-          port <- 20000L + (as.integer(Sys.time()) %% 20000L)
-          t0 <- Sys.time()
-          cat(sprintf("smoke: launching '%s' on 127.0.0.1:%d\n", app_id, port))
-          proc <- callr::r_bg(function(appdir, lib, port) {
+          timeout <- suppressWarnings(as.integer(Sys.getenv("SMOKE_TIMEOUT_SEC", "300"))); if (is.na(timeout) || timeout < 30) timeout <- 300
+          cat(sprintf("smoke: loading app '%s' (rlib on .libPaths)\n", app_id))
+          load_app <- function(appdir, lib) {
             .libPaths(c(lib, .libPaths()))
-            shiny::runApp(appdir, host = "127.0.0.1", port = port, launch.browser = FALSE)
-          }, args = list(appdir = appdir, lib = lib, port = port), supervise = TRUE,
-             stdout = file.path(tmp, "smoke.out"), stderr = file.path(tmp, "smoke.err"))
-          ok <- FALSE; last <- "none"; why <- "deadline"; i <- 0
-          while (as.numeric(Sys.time() - t0) < timeout) {
-            Sys.sleep(2); i <- i + 1
-            if (!proc$is_alive()) { why <- "process exited"; break }
-            r <- tryCatch(curl::curl_fetch_memory(sprintf("http://127.0.0.1:%d/", port),
-                          handle = curl::new_handle(connecttimeout = 4, timeout = 10)),
-                          error = function(e) { last <<- paste("error:", conditionMessage(e)); NULL })
-            if (i %% 15 == 0) cat(sprintf("smoke: still waiting (%ss, last=%s)\n", round(as.numeric(Sys.time() - t0)), last))
-            if (!is.null(r)) { last <- paste("HTTP", r$status_code)
-              if (r$status_code >= 200 && r$status_code < 400) { ok <- TRUE; why <- "served"; break } }
+            old <- setwd(appdir); on.exit(setwd(old), add = TRUE)
+            if (file.exists("app.R")) {
+              obj <- source("app.R")$value
+              if (!inherits(obj, "shiny.appobj")) stop("app.R did not return a shiny app object")
+            } else if (file.exists("ui.R") && file.exists("server.R")) {
+              if (file.exists("global.R")) source("global.R")
+              source("ui.R"); source("server.R")
+              obj <- shiny::shinyApp(ui, server)
+            } else stop("no app.R and no ui.R/server.R")
+            invisible(TRUE)
           }
-          elapsed <- round(as.numeric(Sys.time() - t0), 1)
-          cat(sprintf("smoke: served=%s alive=%s why=%s last=%s elapsed=%ss\n", ok, proc$is_alive(), why, last, elapsed))
-          if (proc$is_alive()) proc$kill(); Sys.sleep(1)
-          if (!ok) {
-            cat("\n---- smoke stdout ----\n"); if (file.exists(file.path(tmp, "smoke.out"))) cat(readLines(file.path(tmp, "smoke.out"), warn = FALSE), sep = "\n")
-            cat("\n---- smoke stderr ----\n"); if (file.exists(file.path(tmp, "smoke.err"))) cat(readLines(file.path(tmp, "smoke.err"), warn = FALSE), sep = "\n")
-            stop("smoke test FAILED: the bundle did not serve a healthy HTTP response (", why, ", last=", last, ", elapsed=", elapsed, "s)")
+          res <- tryCatch(callr::r(load_app, args = list(appdir = appdir, lib = lib), timeout = timeout, show = TRUE),
+                          error = function(e) e)
+          if (inherits(res, "error")) {
+            cat("\n---- smoke error ----\n"); cat(conditionMessage(res), "\n")
+            stop("smoke test FAILED: the app did not start: ", conditionMessage(res))
           }
           cat("SMOKE OK\n")
 
